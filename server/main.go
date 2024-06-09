@@ -15,7 +15,7 @@ import (
 
 type controller struct {
 	mu      sync.Mutex
-	tunnels map[string]net.Conn
+	tunnels map[string]*http.Client
 }
 
 func (c *controller) handleCreateTunnel(w http.ResponseWriter, req *http.Request) {
@@ -28,10 +28,18 @@ func (c *controller) handleCreateTunnel(w http.ResponseWriter, req *http.Request
 		log.Printf("Error hujacking: %s.", fmt.Errorf("hijack: %w", err))
 		return
 	}
-	tunnelID := "3bb01403-9cb1-49c3-8b4a-f33593a833c6"
-	_ = uuid.New().String()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			Dial: func(network, addr string) (net.Conn, error) {
+				return &nopCloserConn{Conn: conn}, nil
+			},
+		},
+	}
+
+	tunnelID := uuid.New().String()
 	c.mu.Lock()
-	c.tunnels[tunnelID] = conn
+	c.tunnels[tunnelID] = client
 	c.mu.Unlock()
 	log.Printf("%s\n", tunnelID)
 }
@@ -49,19 +57,11 @@ func (nopCloserConn) Close() error {
 func (c *controller) handleForward(w http.ResponseWriter, req *http.Request) {
 	tunnelID := strings.Split(req.Host, ".")[0]
 	c.mu.Lock()
-	conn, ok := c.tunnels[tunnelID]
+	client, ok := c.tunnels[tunnelID]
 	c.mu.Unlock()
-	if !ok || conn == nil {
+	if !ok || client == nil {
 		http.Error(w, "Target not found", http.StatusNotFound)
 		return
-	}
-
-	client := &http.Client{
-		Transport: &http.Transport{
-			Dial: func(network, addr string) (net.Conn, error) {
-				return &nopCloserConn{Conn: conn}, nil
-			},
-		},
 	}
 
 	log.Printf(">>> %s\n", req.URL.String())
@@ -86,7 +86,7 @@ func (c *controller) handleForward(w http.ResponseWriter, req *http.Request) {
 
 func run() error {
 	c := &controller{
-		tunnels: map[string]net.Conn{},
+		tunnels: map[string]*http.Client{},
 	}
 
 	go func() {

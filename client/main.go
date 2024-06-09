@@ -3,14 +3,39 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"log"
 	"net"
-	"sync"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
 )
 
+type listener struct {
+	conn net.Conn
+	ch   chan struct{}
+}
+
+func (l *listener) Accept() (net.Conn, error) {
+	l.ch <- struct{}{}
+	log.Printf("Accept!\n")
+	return l.conn, nil
+}
+
+func (l *listener) Addr() net.Addr {
+	return l.conn.LocalAddr()
+}
+
+func (l *listener) Close() error {
+	close(l.ch)
+	log.Printf("Attempt to close.")
+	return nil
+}
+
 func run(ctx context.Context) error {
-	conn, err := net.Dial("tcp", "localhost:9090")
+	var d net.Dialer
+
+	conn, err := d.DialContext(ctx, "tcp", "localhost:9090")
 	if err != nil {
 		return fmt.Errorf("dial: %w", err)
 	}
@@ -18,44 +43,22 @@ func run(ctx context.Context) error {
 
 	fmt.Fprintf(conn, "GET /new HTTP/1.1\r\nHost: localhost\r\n\r\n")
 
-	var mu sync.Mutex
-	var conn2 net.Conn
-	go func() {
-		buf := make([]byte, 32*1024)
-	loop:
-		n, err := conn.Read(buf)
-		if err != nil {
-			log.Printf("read: %s", err)
-			return
-		}
-		mu.Lock()
-		conn22 := conn2
-		mu.Unlock()
-		if _, err := conn22.Write(buf[:n]); err != nil {
-			log.Printf("write: %s", err)
-			return
-		}
-		goto loop
-	}()
-
-loop:
-	conn22, err := net.Dial("tcp", "localhost:8089")
-	if err != nil {
-		return fmt.Errorf("net.Dial2: %w", err)
+	l := &listener{
+		conn: conn,
+		ch:   make(chan struct{}, 1),
 	}
-	mu.Lock()
-	conn2 = conn22
-	mu.Unlock()
-	defer func() { _ = conn2.Close() }() // Best effort.
 
-	go func() {
-		defer log.Printf("conn2 << conn done")
-		_, _ = io.Copy(conn2, conn)
-	}()
+	u, _ := url.Parse("http://localhost:" + os.Args[1])
+	rp := httputil.NewSingleHostReverseProxy(u)
 
-	_, _ = io.Copy(conn, conn2)
-	log.Printf("conn << conn2 done")
-	goto loop
+	srv := &http.Server{
+		Handler: rp,
+	}
+
+	if err := srv.Serve(l); err != nil {
+		return fmt.Errorf("serve: %w", err)
+	}
+
 	return nil
 }
 
